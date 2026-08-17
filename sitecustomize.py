@@ -1,4 +1,4 @@
-"""Termux-friendly runtime enhancements for Tab Assistant's Discord bot."""
+"""Termux-friendly Discord enhancements for Tab Assistant."""
 import asyncio
 import base64
 import builtins
@@ -17,10 +17,9 @@ _active_cfg = None
 COMPOSIO_KNOWLEDGE = (
     "\n\nYou are the Discord interface for Tab Assistant. Composio tools are available when configured. "
     "When a user asks for an external action, use the configured tool-planning and execution system; "
-    "do not say you lack access if the capability is configured. Available toolkits are read from the "
-    "assistant configuration and may include Gmail, web search, and news. Local list and note tools are "
-    "also available. Never claim an action succeeded without a successful tool result. Follow approval "
-    "settings for actions that change or send data."
+    "do not say you lack access if the capability is configured. Available toolkits may include Gmail, "
+    "web search, and news. Local list and note tools are also available. Never claim an action succeeded "
+    "without a successful tool result. Follow approval settings for actions that change or send data."
 )
 
 
@@ -45,61 +44,31 @@ def _invite_url():
     app_id = app_id or os.getenv("DISCORD_APPLICATION_ID", "").strip()
     if not app_id:
         return None
-    return "https://discord.com/oauth2/authorize?" + urlencode({"client_id": app_id, "scope": "bot applications.commands", "permissions": "0"})
+    return "https://discord.com/oauth2/authorize?" + urlencode({
+        "client_id": app_id,
+        "scope": "bot applications.commands",
+        "permissions": "0",
+    })
 
 
 def _print(*args, **kwargs):
-    if _is_tab_assistant() and args:
-        text = str(args[0])
-        if "5. Manage API keys" in text and "0. Exit" in text and "Invite bot" not in text:
-            text += "\n10. Invite bot to a server"
-            args = (text, *args[1:])
     return _original_print(*args, **kwargs)
 
 
 def _input(prompt="", *args, **kwargs):
-    value = _original_input(prompt, *args, **kwargs)
-    if _is_tab_assistant() and prompt.strip() == "Choose:" and value.strip().lower() in {"10", "invite", "i"}:
-        url = _invite_url()
-        _original_print("\nInvite link:\n" + (url or "Could not generate it. Set DISCORD_BOT_TOKEN in .env first.") + "\n")
-        return ""
-    return value
+    return _original_input(prompt, *args, **kwargs)
 
 
 def _channel_ids(cfg):
-    raw = str(cfg.get("discord", {}).get("allowed_channel_id", ""))
-    return {x.strip() for x in raw.split(",") if x.strip()}
+    return {x.strip() for x in str(cfg.get("discord", {}).get("allowed_channel_id", "")).split(",") if x.strip()}
 
 
-def _set_channel(cfg, channel_id, add=False):
-    current = _channel_ids(cfg)
-    if add:
-        current.add(str(channel_id))
-    else:
-        current = {str(channel_id)}
-    value = ",".join(sorted(current))
-    cfg["discord"]["allowed_channel_id"] = value
+def _persist_channel_ids(cfg, ids):
+    cfg["discord"]["allowed_channel_id"] = ",".join(sorted(set(ids)))
     save = globals().get("_save_config")
     if save:
         save(cfg)
-    else:
-        try:
-            env = os.path.join(os.getcwd(), ".env")
-            lines = []
-            if os.path.exists(env):
-                lines = open(env, encoding="utf-8").read().splitlines()
-            found = False
-            for i, line in enumerate(lines):
-                if line.startswith("DISCORD_ALLOWED_CHANNEL_ID="):
-                    lines[i] = "DISCORD_ALLOWED_CHANNEL_ID=" + value
-                    found = True
-            if not found:
-                lines.append("DISCORD_ALLOWED_CHANNEL_ID=" + value)
-            with open(env, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
-        except OSError:
-            pass
-    return value
+    return cfg["discord"]["allowed_channel_id"]
 
 
 def _patch_tree(module):
@@ -108,59 +77,77 @@ def _patch_tree(module):
         return
     _tree_patched = True
     original_sync = module.CommandTree.sync
-    registered = set()
 
     async def patched_sync(self, *args, **kwargs):
-        first_time = id(self) not in registered
-        if first_time:
+        commands_ready = getattr(self, "_tab_channel_commands_ready", False)
+        if not commands_ready:
+            async def this_channel(interaction):
+                if interaction.guild is None:
+                    await interaction.response.send_message("Use this command inside a server.", ephemeral=True)
+                    return
+                perms = getattr(interaction.user, "guild_permissions", None)
+                if not perms or not (getattr(perms, "manage_channels", False) or getattr(perms, "administrator", False)):
+                    await interaction.response.send_message("You need Manage Channels or Administrator.", ephemeral=True)
+                    return
+                cfg = _active_cfg
+                if cfg is None:
+                    await interaction.response.send_message("Bot configuration is unavailable.", ephemeral=True)
+                    return
+                _persist_channel_ids(cfg, {str(interaction.channel_id)})
+                await interaction.response.send_message("✅ This channel is now a bot chat channel.")
+
+            async def add_channel(interaction):
+                if interaction.guild is None:
+                    await interaction.response.send_message("Use this command inside a server.", ephemeral=True)
+                    return
+                perms = getattr(interaction.user, "guild_permissions", None)
+                if not perms or not (getattr(perms, "manage_channels", False) or getattr(perms, "administrator", False)):
+                    await interaction.response.send_message("You need Manage Channels or Administrator.", ephemeral=True)
+                    return
+                cfg = _active_cfg
+                if cfg is None:
+                    await interaction.response.send_message("Bot configuration is unavailable.", ephemeral=True)
+                    return
+                ids = _channel_ids(cfg)
+                ids.add(str(interaction.channel_id))
+                _persist_channel_ids(cfg, ids)
+                await interaction.response.send_message("✅ Added this channel as a bot chat channel.")
+
+            async def remove_channel(interaction):
+                if interaction.guild is None:
+                    await interaction.response.send_message("Use this command inside a server.", ephemeral=True)
+                    return
+                perms = getattr(interaction.user, "guild_permissions", None)
+                if not perms or not (getattr(perms, "manage_channels", False) or getattr(perms, "administrator", False)):
+                    await interaction.response.send_message("You need Manage Channels or Administrator.", ephemeral=True)
+                    return
+                cfg = _active_cfg
+                if cfg is None:
+                    await interaction.response.send_message("Bot configuration is unavailable.", ephemeral=True)
+                    return
+                ids = _channel_ids(cfg)
+                ids.discard(str(interaction.channel_id))
+                _persist_channel_ids(cfg, ids)
+                await interaction.response.send_message("✅ Removed this channel from bot chat channels.")
+
             try:
-                async def this_channel(interaction):
-                    if interaction.guild is None:
-                        await interaction.response.send_message("Use this command inside a server.", ephemeral=True)
-                        return
-                    perms = getattr(interaction.user, "guild_permissions", None)
-                    if not perms or not (getattr(perms, "manage_channels", False) or getattr(perms, "administrator", False)):
-                        await interaction.response.send_message("You need Manage Channels or Administrator to use this.", ephemeral=True)
-                        return
-                    cfg = _active_cfg
-                    if cfg is None:
-                        await interaction.response.send_message("Bot configuration is unavailable.", ephemeral=True)
-                        return
-                    value = _set_channel(cfg, interaction.channel_id, add=False)
-                    await interaction.response.send_message(f"✅ This channel is now the bot channel.\nChannel ID: `{interaction.channel_id}`")
-                    _original_print("Discord channel set to " + value)
-
-                async def add_channel(interaction):
-                    if interaction.guild is None:
-                        await interaction.response.send_message("Use this command inside a server.", ephemeral=True)
-                        return
-                    perms = getattr(interaction.user, "guild_permissions", None)
-                    if not perms or not (getattr(perms, "manage_channels", False) or getattr(perms, "administrator", False)):
-                        await interaction.response.send_message("You need Manage Channels or Administrator to use this.", ephemeral=True)
-                        return
-                    cfg = _active_cfg
-                    if cfg is None:
-                        await interaction.response.send_message("Bot configuration is unavailable.", ephemeral=True)
-                        return
-                    value = _set_channel(cfg, interaction.channel_id, add=True)
-                    await interaction.response.send_message(f"✅ Added this channel to the bot channels.\nChannel ID: `{interaction.channel_id}`")
-                    _original_print("Discord channels: " + value)
-
-                self.add_command(module.Command(name="this-channel", description="Use this channel for the bot", callback=this_channel), override=True)
-                self.add_command(module.Command(name="add-channel", description="Add this channel for the bot", callback=add_channel), override=True)
-                registered.add(id(self))
+                self.command(name="this-channel", description="Make this channel a bot chat channel")(this_channel)
+                self.command(name="add-channel", description="Add this channel as a bot chat channel")(add_channel)
+                self.command(name="remove-channel", description="Stop the bot using this channel")(remove_channel)
+                self._tab_channel_commands_ready = True
+                _original_print("Registered Discord channel commands.")
             except Exception as exc:
-                _original_print("Discord channel command setup failed: " + str(exc))
+                _original_print("Discord channel command registration failed: " + str(exc))
+
         result = await original_sync(self, *args, **kwargs)
-        if first_time:
-            try:
-                client = getattr(self, "client", None)
-                guilds = list(getattr(client, "guilds", []) or [])
-                for guild in guilds:
+
+        client = getattr(self, "client", None)
+        if client is not None:
+            for guild in list(getattr(client, "guilds", []) or []):
+                try:
                     await original_sync(self, guild=guild)
-                _original_print(f"Discord commands synced to {len(guilds)} server(s).")
-            except Exception as exc:
-                _original_print("Discord guild command sync failed: " + str(exc))
+                except Exception as exc:
+                    _original_print("Discord guild command sync failed: " + str(exc))
         return result
 
     module.CommandTree.sync = patched_sync
@@ -248,8 +235,8 @@ def _import(name, globals=None, locals=None, fromlist=(), level=0):
         _patch_discord(root)
         try:
             _patch_tree(root.app_commands)
-        except Exception:
-            pass
+        except Exception as exc:
+            _original_print("Discord command patch load failed: " + str(exc))
     return module
 
 
