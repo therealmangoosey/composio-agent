@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import traceback
 import uuid
@@ -35,15 +36,13 @@ ENV_FILE = ROOT / ".env"
 
 PROVIDERS = {
     "GROQ": {"base_url": "https://api.groq.com/openai/v1", "free": True, "models": [
-        "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "meta-llama/llama-4-scout-17b-16e-instruct",
-        "openai/gpt-oss-120b", "qwen/qwen3-32b"]},
+        "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.6-27b"]},
     "Google Gemini": {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "free": True,
                       "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"]},
     "OpenAI": {"base_url": "https://api.openai.com/v1", "free": False,
                "models": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"]},
     "OpenRouter": {"base_url": "https://openrouter.ai/api/v1", "free": True,
-                   "models": ["openai/gpt-oss-120b:free", "meta-llama/llama-3.3-70b-instruct:free",
-                              "qwen/qwen3-32b:free"]},
+                   "models": ["openrouter/free", "openai/gpt-oss-120b:free", "openai/gpt-oss-20b:free"]},
     "Cerebras": {"base_url": "https://api.cerebras.ai/v1", "free": True,
                  "models": ["llama3.1-8b", "gpt-oss-120b"]},
     "DeepSeek": {"base_url": "https://api.deepseek.com", "free": False,
@@ -171,7 +170,7 @@ def default_config():
         "failures": {},
         "composio": {"api_key": "", "toolkits": ["GMAIL", "WEB_SEARCH", "NEWS"], "user_id": "tab-owner",
                      "toolkit_version": "latest"},
-        "discord": {"token": "", "allowed_channel_id": "", "allowed_user_ids": []},
+        "discord": {"token": "", "allowed_channel_id": "", "allowed_user_ids": [], "autostart": True},
         "settings": {"system_prompt": DEFAULT_SYSTEM, "max_history": 8, "streaming": False,
                      "temperature": 0.7, "require_approval": True, "cooldown_seconds": 60},
     }
@@ -198,6 +197,7 @@ def merge_defaults(cfg):
     cfg["composio"].setdefault("user_id", "tab-owner")
     cfg["composio"].setdefault("toolkit_version", "latest")
     cfg["discord"].setdefault("allowed_user_ids", [])
+    cfg["discord"].setdefault("autostart", True)
     return cfg
 
 
@@ -270,6 +270,43 @@ def wizard():
     return cfg
 
 
+MODEL_CACHE = {}
+MODEL_CACHE_TTL = 300
+
+
+def refresh_provider_models(cfg, provider, key, force=False):
+    """Refresh active model IDs so retired provider models cannot poison failover."""
+    if not key:
+        return cfg["providers"].get(provider, {}).get("models", [])
+    cache_key = provider + ":" + key[:12]
+    cached = MODEL_CACHE.get(cache_key)
+    if not force and cached and time.time() - cached["time"] < MODEL_CACHE_TTL:
+        return cached["models"]
+    base_url = cfg["providers"][provider]["base_url"].rstrip("/")
+    try:
+        response = requests.get(base_url + "/models", headers={"Authorization": "Bearer " + key}, timeout=8)
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        models = [str(item.get("id")) for item in data if item.get("id")]
+        if provider == "OpenRouter":
+            free = []
+            for item in data:
+                model_id = item.get("id")
+                pricing = item.get("pricing", {}) or {}
+                if model_id and (model_id == "openrouter/free" or ":free" in model_id or
+                                  (str(pricing.get("prompt")) in {"0", "0.0"} and
+                                   str(pricing.get("completion", pricing.get("output"))) in {"0", "0.0"})):
+                    free.append(str(model_id))
+            models = free or ["openrouter/free"]
+        if models:
+            MODEL_CACHE[cache_key] = {"time": time.time(), "models": models}
+            cfg["providers"][provider]["models"] = models
+            return models
+    except (requests.RequestException, ValueError, TypeError, KeyError):
+        pass
+    return cfg["providers"].get(provider, {}).get("models", [])
+
+
 def failure_id(provider, key):
     return provider + ":" + hashlib.sha256(key.encode()).hexdigest()[:16]
 
@@ -320,7 +357,9 @@ def candidates(cfg, mode):
         for item in keys:
             if mode == "free" and not item.get("free"):
                 continue
-            models = info.get("models", []) or [cfg.get("selected_model", "")]
+            models = refresh_provider_models(cfg, provider, item.get("key", "")) or info.get("models", []) or [cfg.get("selected_model", "")]
+            if mode == "free" and provider == "OpenRouter":
+                models = [m for m in models if m == "openrouter/free" or ":free" in m] or ["openrouter/free"]
             preferred = last.get("model") if last.get("provider") == provider else None
             ordered = ([preferred] if preferred in models else []) + [m for m in models if m != preferred]
             for model in ordered:
@@ -382,6 +421,11 @@ def send_with_failover(cfg, session, stream=None, force_json=False):
         provider = cfg.get("selected_provider", "GROQ")
         model = cfg.get("selected_model") or cfg["providers"][provider]["models"][0]
         keys = cfg["providers"].get(provider, {}).get("keys", [])
+        if keys and keys[0].get("key"):
+            active_models = refresh_provider_models(cfg, provider, keys[0]["key"])
+            if active_models and model not in active_models:
+                model = active_models[0]
+                cfg["selected_model"] = model
         choices = [(provider, model, keys[0]["key"])] if keys and keys[0].get("key") else []
     else:
         choices = candidates(cfg, "free" if mode == "free" else "auto")
@@ -545,29 +589,20 @@ def manage_keys(cfg):
 
 
 def discord_invite_link(cfg):
-    """Return a Discord bot invite URL using the configured bot token."""
     token = cfg.get("discord", {}).get("token", "")
     if not token:
         return None, "Set DISCORD_BOT_TOKEN in .env first."
     try:
-        r = requests.get(
-            "https://discord.com/api/v10/users/@me",
-            headers={"Authorization": "Bot " + token},
-            timeout=10,
-        )
+        r = requests.get("https://discord.com/api/v10/users/@me", headers={"Authorization": "Bot " + token}, timeout=10)
         if not r.ok:
             return None, "Discord rejected the bot token."
         app_id = str(r.json().get("id", ""))
         if not app_id:
             return None, "Discord did not return the bot application ID."
-        return (
-            "https://discord.com/oauth2/authorize?client_id="
-            + app_id
-            + "&scope=bot%20applications.commands&permissions=84992",
-            None,
-        )
+        return "https://discord.com/oauth2/authorize?client_id=" + app_id + "&scope=bot%20applications.commands&permissions=84992", None
     except (requests.RequestException, ValueError, TypeError) as exc:
         return None, "Could not contact Discord: " + short(exc)
+
 
 def local_tool(tool, args):
     DATA.mkdir(parents=True, exist_ok=True)
@@ -727,7 +762,7 @@ def history_menu(cfg):
 def main_menu(cfg):
     while True:
         clear(); p(f"=== Tab Assistant | {cfg['selected_provider']} / {cfg['selected_model']} | {cfg['mode']} ===")
-        p("1. Start / continue chat       6. Memory & history\n2. Choose provider             7. Composio tools & connections\n3. Choose model                8. Discord bot\n4. Choose mode                 9. Settings\n5. Manage API keys            10. Invite bot to a server\n0. Exit")
+        p("1. Start / continue chat       6. Memory & history\n2. Choose provider             7. Composio tools & connections\n3. Choose model                8. Discord bot (background)\n4. Choose mode                 9. Settings\n5. Manage API keys            10. Invite bot to a server\n0. Exit")
         try:
             choice = input("\nChoose: ").strip()
         except (KeyboardInterrupt, EOFError):
@@ -740,7 +775,7 @@ def main_menu(cfg):
         elif choice == "5": manage_keys(cfg)
         elif choice == "6": history_menu(cfg)
         elif choice == "7": tools_menu(cfg)
-        elif choice == "8": p("Run in another Termux/tmux session: python app.py --bot"); input("Enter")
+        elif choice == "8": p("Discord bot runs automatically in the background when DISCORD_BOT_TOKEN is configured."); input("Enter")
         elif choice == "9": settings(cfg)
         elif choice == "10":
             link, error = discord_invite_link(cfg)
@@ -756,11 +791,13 @@ def run_bot(cfg):
     try:
         import discord
     except ImportError:
-        p("Discord bot needs: pip install -U discord.py"); return
+        p("Discord bot needs: python -m pip install -U discord.py"); return
     token = cfg["discord"].get("token")
     allowed = str(cfg["discord"].get("allowed_channel_id", ""))
-    if not token or not allowed:
-        p("Set DISCORD_BOT_TOKEN and DISCORD_ALLOWED_CHANNEL_ID in .env."); return
+    if not token:
+        p("Discord bot disabled: DISCORD_BOT_TOKEN is not configured."); return
+    if not allowed:
+        p("Discord bot disabled: DISCORD_ALLOWED_CHANNEL_ID is not configured."); return
     intents = discord.Intents.default()
     bot = discord.Client(intents=intents)
     tree = discord.app_commands.CommandTree(bot)
@@ -895,8 +932,14 @@ def main():
     args = parser.parse_args()
     try:
         cfg = load_config() or wizard()
-        if args.bot: run_bot(cfg)
-        else: main_menu(cfg)
+        if args.bot:
+            run_bot(cfg)
+        else:
+            token = cfg.get("discord", {}).get("token", "")
+            autostart = bool(cfg.get("discord", {}).get("autostart", True))
+            if token and autostart:
+                threading.Thread(target=run_bot, args=(cfg,), daemon=True, name="discord-bot").start()
+            main_menu(cfg)
     except (KeyboardInterrupt, EOFError):
         p("\nStopped safely.")
     except Exception as exc:
@@ -904,5 +947,4 @@ def main():
         if args.debug: traceback.print_exc()
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
