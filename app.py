@@ -563,7 +563,7 @@ def discord_invite_link(cfg):
         return (
             "https://discord.com/oauth2/authorize?client_id="
             + app_id
-            + "&scope=bot%20applications.commands&permissions=0",
+            + "&scope=bot%20applications.commands&permissions=84992",
             None,
         )
     except (requests.RequestException, ValueError, TypeError) as exc:
