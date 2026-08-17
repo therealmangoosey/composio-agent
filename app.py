@@ -25,6 +25,7 @@ except ImportError:
     pass
 
 import requests
+from parallel_agents import run_parallel
 from openai import OpenAI, APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 
 ROOT = Path(__file__).resolve().parent
@@ -52,7 +53,10 @@ PROVIDERS = {
 
 DEFAULT_SYSTEM = (
     "You are Tab Assistant, a careful personal AI assistant. Be concise and helpful. "
-    "Never claim an external action happened unless a tool result confirms it."
+    "Never claim an external action happened unless a tool result confirms it. "
+    "You have access to Composio tools when COMPOSIO_API_KEY is configured, and you may build and execute tool plans. "
+    "For independent multi-part research requests, split the work into separate research tasks and run them in parallel when possible, then synthesize the results. "
+    "Do not pretend to have a tool that is unavailable; use the configured Composio planner for external actions."
 )
 
 
@@ -787,6 +791,18 @@ def main_menu(cfg):
             input("Enter to continue")
 
 
+def parallel_research(cfg, topics):
+    """Research independent topics concurrently using the normal assistant path."""
+    topics=[t.strip() for t in topics if t.strip()]
+    if not topics: return []
+    def worker(topic):
+        session=new_session()
+        add_message(session,"user", "Research this topic thoroughly and return concise factual findings with useful sources where available: " + topic)
+        answer, provider, model=send_with_failover(cfg, session, stream=False)
+        return answer
+    return run_parallel(topics, worker, max_workers=min(4,len(topics)))
+
+
 def run_bot(cfg):
     try:
         import discord
@@ -804,9 +820,21 @@ def run_bot(cfg):
     plans = {}
     discord_session = new_session()
 
+    def channel_ids():
+        return {x.strip() for x in str(cfg["discord"].get("allowed_channel_id", "")).split(",") if x.strip()}
+
+    def persist_channel_ids(ids):
+        cfg["discord"]["allowed_channel_id"]=",".join(sorted(set(ids)))
+        persist_runtime(cfg)
+        save_dotenv(secret_values(cfg))
+
+    def can_manage_channels(interaction):
+        perms=getattr(interaction.user,"guild_permissions",None)
+        return bool(perms and (getattr(perms,"manage_channels",False) or getattr(perms,"administrator",False)))
+
     def allowed_interaction(interaction):
-        allow_users = cfg["discord"].get("allowed_user_ids", [])
-        return (interaction.guild is not None and str(interaction.channel_id) == allowed and
+        allow_users=cfg["discord"].get("allowed_user_ids",[])
+        return (interaction.guild is not None and str(interaction.channel_id) in channel_ids() and
                 (not allow_users or interaction.user.id in allow_users))
 
     async def guard(interaction):
@@ -839,6 +867,41 @@ def run_bot(cfg):
         async def on_timeout(self):
             plans.pop(self.pid, None)
             for child in self.children: child.disabled = True
+
+    @tree.command(name="this-channel", description="Make this channel a bot chat channel")
+    async def this_channel(interaction):
+        if interaction.guild is None or not can_manage_channels(interaction):
+            await interaction.response.send_message("You need Manage Channels or Administrator in a server.",ephemeral=True); return
+        persist_channel_ids({str(interaction.channel_id)})
+        await interaction.response.send_message("✅ This is now the bot chat channel.")
+
+    @tree.command(name="add-channel", description="Add this channel as a bot chat channel")
+    async def add_channel(interaction):
+        if interaction.guild is None or not can_manage_channels(interaction):
+            await interaction.response.send_message("You need Manage Channels or Administrator in a server.",ephemeral=True); return
+        persist_channel_ids(channel_ids() | {str(interaction.channel_id)})
+        await interaction.response.send_message("✅ Added this bot chat channel.")
+
+    @tree.command(name="remove-channel", description="Remove this channel from bot chat")
+    async def remove_channel(interaction):
+        if interaction.guild is None or not can_manage_channels(interaction):
+            await interaction.response.send_message("You need Manage Channels or Administrator in a server.",ephemeral=True); return
+        ids=channel_ids(); ids.discard(str(interaction.channel_id)); persist_channel_ids(ids)
+        await interaction.response.send_message("✅ Removed this bot chat channel.")
+
+    @tree.command(name="research", description="Research multiple topics in parallel")
+    async def research(interaction, topics: str):
+        if not await guard(interaction): return
+        parts=[x.strip() for x in re.split(r"\s*(?:,|\||;|\band\b)\s*",topics,flags=re.I) if x.strip()]
+        if len(parts)<2: parts=[x.strip() for x in topics.split("
+") if x.strip()]
+        if len(parts)<2:
+            await interaction.response.send_message("Give me multiple topics separated by commas, e.g. `AI, Minecraft, OpenWrt`.",ephemeral=True); return
+        parts=parts[:4]
+        await interaction.response.defer(thinking=True)
+        results=parallel_research(cfg,parts)
+        text="\n\n".join(f"### {parts[i]}\n{('❌ '+r if not ok else r)[:1500]}" for i,(ok,r) in enumerate(results))
+        await interaction.followup.send(("🔎 Parallel research — "+str(len(parts))+" agents\n"+text)[:1900])
 
     @tree.command(name="chat", description="Chat without tools")
     async def chat(interaction, message: str):
@@ -913,9 +976,12 @@ def run_bot(cfg):
     async def on_ready():
         try:
             await tree.sync()
+            for guild in bot.guilds:
+                try: await tree.sync(guild=guild)
+                except Exception as exc: log_error(exc)
+            p(f"Discord ready as {bot.user}; chat channels: {', '.join(sorted(channel_ids())) or 'none'}")
         except Exception as exc:
             log_error(exc); p("Discord command sync failed: " + short(exc)); return
-        p(f"Discord ready as {bot.user}; locked to channel {allowed}")
 
     try:
         bot.run(token, reconnect=True)
