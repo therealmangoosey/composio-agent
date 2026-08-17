@@ -47,7 +47,7 @@ python -m pip install -U discord.py
 python -m pip install -U composio
 ```
 
-Composio's current Python SDK requires Python 3.10+ and supports direct `composio.tools.execute(...)` calls. If a tool requires a specific toolkit version, set `composio.toolkit_version` in `data/config.json`. citeturn0search0turn0search5turn0search7
+The current Composio Python SDK supports direct `composio.tools.execute(...)` calls. If a tool requires a specific toolkit version, set `composio.toolkit_version` in `data/config.json`.
 
 ## Updating the app
 
