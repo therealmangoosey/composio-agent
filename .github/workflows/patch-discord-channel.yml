@@ -1,0 +1,56 @@
+name: One-time Discord channel message patch
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: !startsWith(github.event.head_commit.message, 'chore: enable plain Discord channel messages')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch Discord message handling
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app.py')
+          s = p.read_text()
+          old = '''    intents = discord.Intents.default()\n    bot = discord.Client(intents=intents)\n'''
+          new = '''    intents = discord.Intents.default()\n    intents.message_content = True\n    bot = discord.Client(intents=intents)\n'''
+          if old not in s:
+              raise SystemExit('Discord client block not found')
+          s = s.replace(old, new, 1)
+          marker = '''    @tree.command(name="chat", description="Chat without tools")\n'''
+          handler = '''    @bot.event\n    async def on_message(message):\n        # Every normal message in the configured channel is treated as a chat message.\n        if message.author.bot or message.guild is None or str(message.channel.id) != allowed:\n            return\n        allow_users = cfg["discord"].get("allowed_user_ids", [])\n        if allow_users and message.author.id not in allow_users:\n            return\n        text = message.content.strip()\n        if not text or text.startswith('/'):\n            return\n        try:\n            async with message.channel.typing():\n                add_message(discord_session, "user", text)\n                answer, provider, model = send_with_failover(cfg, discord_session, stream=False)\n                add_message(discord_session, "assistant", answer, provider, model)\n                await message.reply(answer[:1900], mention_author=False)\n        except Exception as exc:\n            log_error(exc)\n            await message.reply("❌ " + short(exc), mention_author=False)\n\n'''
+          if handler not in s:
+              if marker not in s:
+                  raise SystemExit('Discord chat marker not found')
+              s = s.replace(marker, handler + marker, 1)
+          p.write_text(s)
+          PY
+      - name: Update README
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('README.md')
+          s = p.read_text() if p.exists() else ''
+          needle = 'The bot refuses DMs and channels other than the configured channel.'
+          replacement = 'The bot refuses DMs and channels other than the configured channel. Every normal message posted in the configured channel is treated as a chat message; slash commands are only needed for bot controls such as `/status`, `/model`, `/provider`, `/mode`, `/history`, and `/clear`.'
+          if needle in s:
+              s = s.replace(needle, replacement, 1)
+          p.write_text(s)
+          PY
+      - name: Commit patch and remove workflow
+        run: |
+          rm -f .github/workflows/patch-discord-channel.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py README.md .github/workflows/patch-discord-channel.yml
+          git commit -m 'chore: enable plain Discord channel messages'
+          git push
