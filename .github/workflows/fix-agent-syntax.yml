@@ -1,0 +1,36 @@
+name: Fix agent syntax
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  fix:
+    if: !startsWith(github.event.head_commit.message, 'chore: fix parallel research syntax')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Repair syntax and validate
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app.py')
+          s = p.read_text(encoding='utf-8')
+          bad = 'if len(parts)<2: parts=[x.strip() for x in topics.split("\n") if x.strip()]'
+          if bad not in s:
+              raise SystemExit('Expected malformed research line was not found')
+          good = 'if len(parts) < 2: parts = [x.strip() for x in topics.splitlines() if x.strip()]'
+          s = s.replace(bad, good, 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+          python -m py_compile app.py parallel_agents.py
+      - name: Commit repair and remove workflow
+        run: |
+          rm -f .github/workflows/fix-agent-syntax.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py .github/workflows/fix-agent-syntax.yml
+          git commit -m 'chore: fix parallel research syntax'
+          git push
