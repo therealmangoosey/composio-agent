@@ -1,0 +1,48 @@
+name: Patch real Discord channel commands
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: !startsWith(github.event.head_commit.message, 'chore: register real Discord channel commands')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch app.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app.py')
+          s = p.read_text()
+          marker = '''    def allowed_interaction(interaction):\n        allow_users = cfg["discord"].get("allowed_user_ids", [])\n        return (interaction.guild is not None and str(interaction.channel_id) == allowed and\n                (not allow_users or interaction.user.id in allow_users))\n'''
+          replacement = '''    def channel_ids():\n        return {x.strip() for x in str(cfg["discord"].get("allowed_channel_id", "")).split(",") if x.strip()}\n\n    def persist_channel_ids(ids):\n        cfg["discord"]["allowed_channel_id"] = ",".join(sorted(set(ids)))\n        persist_runtime(cfg)\n\n    def can_manage_channels(interaction):\n        perms = getattr(interaction.user, "guild_permissions", None)\n        return bool(perms and (getattr(perms, "manage_channels", False) or getattr(perms, "administrator", False)))\n\n    def allowed_interaction(interaction):\n        allow_users = cfg["discord"].get("allowed_user_ids", [])\n        return (interaction.guild is not None and str(interaction.channel_id) in channel_ids() and\n                (not allow_users or interaction.user.id in allow_users))\n'''
+          if marker not in s:
+              raise SystemExit('allowed_interaction block not found')
+          s = s.replace(marker, replacement, 1)
+          marker2 = '''    @tree.command(name="chat", description="Chat without tools")\n'''
+          commands = '''    @tree.command(name="this-channel", description="Make this channel a bot chat channel")\n    async def this_channel(interaction):\n        if interaction.guild is None:\n            await interaction.response.send_message("Use this command inside a server.", ephemeral=True); return\n        if not can_manage_channels(interaction):\n            await interaction.response.send_message("You need Manage Channels or Administrator.", ephemeral=True); return\n        persist_channel_ids({str(interaction.channel_id)})\n        await interaction.response.send_message("✅ This channel is now the bot chat channel.")\n\n    @tree.command(name="add-channel", description="Add this channel as a bot chat channel")\n    async def add_channel(interaction):\n        if interaction.guild is None:\n            await interaction.response.send_message("Use this command inside a server.", ephemeral=True); return\n        if not can_manage_channels(interaction):\n            await interaction.response.send_message("You need Manage Channels or Administrator.", ephemeral=True); return\n        persist_channel_ids(channel_ids() | {str(interaction.channel_id)})\n        await interaction.response.send_message("✅ Added this channel as a bot chat channel.")\n\n    @tree.command(name="remove-channel", description="Stop the bot using this channel")\n    async def remove_channel(interaction):\n        if interaction.guild is None:\n            await interaction.response.send_message("Use this command inside a server.", ephemeral=True); return\n        if not can_manage_channels(interaction):\n            await interaction.response.send_message("You need Manage Channels or Administrator.", ephemeral=True); return\n        ids = channel_ids(); ids.discard(str(interaction.channel_id)); persist_channel_ids(ids)\n        await interaction.response.send_message("✅ Removed this channel from bot chat channels.")\n\n'''
+          if marker2 not in s:
+              raise SystemExit('chat command marker not found')
+          s = s.replace(marker2, commands + marker2, 1)
+          old_ready = '''    @bot.event\n    async def on_ready():\n        try:\n            await tree.sync()\n        except Exception as exc:\n            log_error(exc); p("Discord command sync failed: " + short(exc)); return\n        p(f"Discord ready as {bot.user}; locked to channel {allowed}")\n'''
+          new_ready = '''    @bot.event\n    async def on_ready():\n        try:\n            await tree.sync()\n            for guild in bot.guilds:\n                try:\n                    await tree.sync(guild=guild)\n                except Exception as exc:\n                    log_error(exc)\n            p(f"Discord ready as {bot.user}; chat channels: {', '.join(sorted(channel_ids())) or 'none'}")\n        except Exception as exc:\n            log_error(exc); p("Discord command sync failed: " + short(exc)); return\n'''
+          if old_ready not in s:
+              raise SystemExit('on_ready block not found')
+          s = s.replace(old_ready, new_ready, 1)
+          p.write_text(s)
+          PY
+      - name: Remove runtime command hack
+        run: |
+          rm -f sitecustomize.py
+          rm -f .github/workflows/patch-real-channel-commands.yml
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py sitecustomize.py .github/workflows/patch-real-channel-commands.yml
+          git commit -m 'chore: register real Discord channel commands'
+          git push
