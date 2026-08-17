@@ -144,3 +144,124 @@ def patch_approval_owner():
         pass
 
 patch_approval_owner()
+
+# Research-first Composio planner. The planner must not guess action slugs from
+# model memory. It searches the live web first, then gives the search evidence to
+# a free model to map the user's request to a current Composio action.
+RESEARCH_MARKER = "# composio-web-research-v1"
+
+def patch_composio_research():
+    try:
+        s = APP.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if RESEARCH_MARKER in s:
+        return
+
+    helpers = r'''
+
+def web_search(query, limit=6):
+    """Small dependency-free web search for research/planning.
+    Uses DuckDuckGo HTML so no paid search API is required.
+    """
+    try:
+        from urllib.parse import quote_plus
+        from html import unescape
+        url="https://html.duckduckgo.com/html/?q="+quote_plus(query)
+        r=requests.get(url,headers={"User-Agent":"Mozilla/5.0 (Termux Tab Assistant)"},timeout=12)
+        r.raise_for_status()
+        body=r.text
+        results=[]
+        for m in re.finditer(r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',body,re.I|re.S):
+            href=unescape(re.sub(r"<.*?>","",m.group(1)))
+            title=unescape(re.sub(r"<.*?>"," ",m.group(2))).strip()
+            if not href.startswith("http"): continue
+            if any(x["url"]==href for x in results): continue
+            results.append({"title":short(title,220),"url":href})
+            if len(results)>=limit: break
+        return results
+    except Exception as exc:
+        log_error(exc)
+        return []
+
+def research_composio(request):
+    queries=[
+        f"Composio {request} action tool",
+        f"site:composio.dev/docs {request} Composio",
+        f"site:composio.dev/tools {request} Composio",
+        f"site:github.com/ComposioHQ {request} Composio"
+    ]
+    seen=set(); out=[]
+    for q in queries:
+        for item in web_search(q,5):
+            if item["url"] not in seen:
+                seen.add(item["url"]);out.append(item)
+            if len(out)>=10:return out
+    return out
+
+def best_free_research_send(cfg, session, system=None):
+    """Prefer OpenRouter's free router, then other configured free providers."""
+    original=cfg.get("mode")
+    try:
+        cfg["mode"]="free"
+        # send() already filters free keys/models. Put OpenRouter first by moving
+        # its last-working preference into the normal ordering path.
+        old=cfg.get("last_working",{}).copy()
+        for info in cfg.get("providers",{}).values():
+            pass
+        if "OpenRouter" in cfg.get("providers",{}):
+            models=fetch_models(cfg,"OpenRouter",next((x["key"] for x in cfg["providers"]["OpenRouter"]["keys"] if x.get("free")),""))
+            free_models=[m for m in models if m=="openrouter/free" or ":free" in m]
+            if free_models:
+                cfg["last_working"]={"provider":"OpenRouter","model":free_models[0]}
+        return send(cfg,session,system=system,temperature=0.1)
+    finally:
+        cfg["mode"]=original
+
+def researched_composio_plan(cfg,request):
+    evidence=research_composio(request)
+    evidence_text="\n".join(f"- {x['title']} — {x['url']}" for x in evidence)
+    if not evidence_text:
+        evidence_text="No web results were returned. Do not guess an action slug; say that live Composio research failed."
+    s=new_session("composio-planner")
+    add(s,"user",(
+        "Research-backed Composio planning request.\nUSER REQUEST: "+request+
+        "\n\nLIVE WEB SEARCH RESULTS:\n"+evidence_text+
+        "\n\nReturn JSON only: {\"steps\":[{\"tool\":\"EXACT_ACTION_SLUG\",\"description\":\"what it does\",\"args\":{}}]}. "
+        "Use the web evidence to identify the current Composio action/tool slug and expected arguments. "
+        "Never invent a slug. If the evidence is insufficient, return {\"steps\":[]}. "
+        "Do not execute anything."
+    ))
+    return best_free_research_send(cfg,s,system=(
+        "You are the Composio research planner. You MUST use the supplied live web-search evidence rather than relying on memory. "
+        "Prefer official Composio documentation/tool pages. Cross-check conflicting results. "
+        "Output valid JSON only. Never claim an action exists unless the evidence supports it."
+    ))
+
+'''
+    anchor='def composio_plan(cfg,request):\n'
+    if anchor not in s: return
+    s=s.replace(anchor,helpers+anchor,1)
+    old='''def composio_plan(cfg,request):
+    if not cfg["composio"].get("api_key"): raise RuntimeError("Composio API key is not configured.")
+    s=new_session(); add(s,"user",'Return JSON only: {"steps":[{"tool":"ACTION_SLUG","description":"what it does","args":{}}]}. Select only tools that plausibly exist in the connected Composio account. Never execute. Request: '+request); raw=send(cfg,s,json_mode=True); match=re.search(r"\{.*\}",raw,re.S)
+    if not match: raise RuntimeError("Composio planner returned invalid JSON.")
+    return json.loads(match.group(0))
+'''
+    new='''def composio_plan(cfg,request):
+    if not cfg["composio"].get("api_key"): raise RuntimeError("Composio API key is not configured.")
+    raw=researched_composio_plan(cfg,request)
+    match=re.search(r"\{.*\}",raw,re.S)
+    if not match: raise RuntimeError("Research planner returned invalid JSON.")
+    plan=json.loads(match.group(0))
+    if not isinstance(plan,dict) or not isinstance(plan.get("steps"),list): raise RuntimeError("Research planner returned an invalid plan.")
+    if not plan["steps"]: raise RuntimeError("I researched the Composio request but could not verify a matching action/tool. I will not guess one.")
+    return plan
+'''
+    if old not in s: return
+    s=s.replace(old,new,1)
+    s += "\n"+RESEARCH_MARKER+"\n"
+    try: APP.write_text(s,encoding="utf-8")
+    except OSError: pass
+
+patch_composio_research()
