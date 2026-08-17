@@ -1,137 +1,107 @@
 # Tab Assistant
 
-A single-file, pure-Python personal AI assistant built for [Termux](https://termux.dev) on Android
-(it runs anywhere Python 3 does). It gives you two frontends that share the same brain:
+A lightweight single-file AI assistant designed for **Termux on Android**, including older Samsung Tab A devices. It provides a numbered terminal UI, multi-provider chat/failover, local notes/lists, optional Composio actions, and an optional locked Discord bot.
 
-1. **A numbered terminal menu app** with an interactive chat, key management, memory, and tools.
-2. **An optional, locked-down Discord bot** that answers slash commands in exactly one channel.
+The app intentionally keeps CPU/RAM use low: short default history, no background workers, no always-on polling, a 30-second provider timeout, and streaming is **off by default**. Everything runs only when you use it.
 
-Everything lives in one file — `app.py` — plus a `data/` folder it creates beside itself. Keys and
-conversations never leave your device except to the model providers you configure.
+## Features
 
----
+- OpenAI-compatible providers: GROQ, Google Gemini, OpenRouter, Cerebras, OpenAI, DeepSeek and xAI.
+- Manual, Free and Auto provider modes.
+- Automatic key/model failover with cooldowns and `Retry-After` handling.
+- Safer handling of providers that reject `temperature` or JSON response formatting.
+- Persistent chat sessions in `data/memory.json`.
+- Local `ADD_TO_LIST`, `READ_LIST`, `SAVE_NOTE` and `READ_NOTE` tools.
+- Approval-gated agent plans. Plans do not execute until you confirm them.
+- Optional Composio direct tool execution.
+- Optional Discord bot locked to one configured channel and optional user allowlist.
+- Full unexpected tracebacks go to `data/errors.log`.
+- API keys and Discord/Composio secrets stay in `.env`, which is gitignored.
 
-## What it does
+## Termux / Samsung Tab A setup
 
-### Multi-provider chat with automatic failover — free tier if you want it
-Talk to any of seven OpenAI-compatible providers, switching at any time:
-
-| Provider      | Free tier available | Example models (editable) |
-|---------------|--------------------|---------------------------|
-| GROQ          | ✅ | llama-3.3-70b-versatile, llama-3.1-8b-instant, llama-4-scout, gpt-oss-120b, qwen3-32b |
-| Google Gemini | ✅ | gemini-2.5-flash, gemini-2.5-flash-lite |
-| OpenRouter    | ✅ | llama-3.3-70b-instruct:free, deepseek-r1:free, gemma-3-27b-it:free, … |
-| Cerebras      | ✅ | llama3.1-8b, gpt-oss-120b |
-| OpenAI        | paid | gpt-4o-mini, gpt-4o, gpt-4.1-mini |
-| DeepSeek      | paid | deepseek-chat, deepseek-v4-flash |
-| xAI Grok      | paid | grok-4.6 |
-
-Three **modes** control which keys a request may use:
-
-- **Manual** — exactly the provider/model you selected, using its first key. No rotation.
-- **Free** *(default)* — rotates only keys you marked as FREE tier, across providers, until one answers.
-- **Auto** — like Free, but paid keys are eligible too.
-
-Every key is health-tracked: rate limits and auth failures put that key on a cooldown (auth errors
-cool down longer; `Retry-After` headers are honored), and the last provider/model that answered
-successfully is tried first next time and restored on restart. Friendly errors tell you what
-happened ("Rate limited — switching…", "Can't reach the internet", …) while full tracebacks go to
-`data/errors.log`.
-
-### Chat features
-- Streaming replies (toggleable), adjustable temperature, and a configurable system prompt.
-- Rolling context window (`max_history`, default 12 messages).
-- Persistent sessions in `data/memory.json` — resume, delete, or clear-all from the Memory menu.
-- Slash commands inside chat: `/help`, `/new`, `/history`, `/provider NAME`, `/model NAME`, `/mode MODE`, `/quit`.
-
-### Agent plans with mandatory human approval
-Ask for something multi-step ("save a note with … and add … to my leads") and the assistant builds a
-JSON **plan** — a summary plus numbered steps. **Nothing ever executes without your explicit
-confirmation**: `y/N` in the terminal, or ✅ / ❌ buttons in Discord (only the plan's owner can click,
-and plans expire after 5 minutes).
-
-Available tools:
-
-- **Local tools — always work, no account needed**
-  - `ADD_TO_LIST` / `READ_LIST` — a simple CRM-style `data/leads.csv` (name, email, notes).
-  - `SAVE_NOTE` / `READ_NOTE` — a timestamped `data/notes.txt` journal.
-- **Composio tools — optional** (Gmail, web search, news, and any other Composio action)
-  - Requires the Composio SDK, an API key, and an OAuth connection for the toolkit.
-  - Configured under `composio` in `data/config.json` (`toolkits`, `user_id`).
-
-### Discord bot (optional)
-Run alongside or instead of the terminal UI. It is deliberately locked down:
-
-- Responds **only** in the one channel ID you configure — DMs and all other channels are refused.
-- Optional `allowed_user_ids` allowlist in `data/config.json`.
-- Slash commands: `/chat`, `/plan` (with Confirm/Deny buttons), `/status` (active model + key health),
-  `/provider`, `/model`, `/mode`, `/history`, `/clear`, `/help`.
-
-### Privacy & secrets handling
-- All secrets (provider keys, Discord token/channel, Composio key) live **only** in `.env`, never in
-  `data/config.json`; the included `.gitignore` excludes `.env`, `data/`, `__pycache__/`, and `*.pyc`.
-- Keys are masked (`abcd…wxyz`) everywhere they are displayed.
-- The first-run wizard validates your Composio key if provided, but never prints secrets.
-
----
-
-## Setup
-
-### On Termux (Android)
+The project is designed to run on normal Termux Python without a compiler-heavy dependency stack.
 
 ```sh
-pkg update && pkg install python -y
-pip install openai requests discord.py
-# Optional: real Gmail/web/news tools via Composio
-pip install composio composio-openai
+pkg update
+pkg install git python -y
+cd ~
+git clone https://github.com/therealmangoosey/composio-agent.git
+cd composio-agent
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python app.py
 ```
 
-### Anywhere else (Linux/macOS/Windows)
+Python **3.10+** is recommended. The core app only needs `openai` and `requests`.
 
-Python 3.10+ recommended, then the same installs:
+### Optional Discord bot
 
 ```sh
-pip install openai requests discord.py        # discord.py only needed for the bot
-pip install composio composio-openai          # optional
+python -m pip install -U discord.py
 ```
 
-Dependencies are minimal on purpose: `requests` + `openai` are required; `discord.py` and `composio`
-are only imported when you use those features.
+### Optional Composio tools
 
-### First run — the setup wizard
+```sh
+python -m pip install -U composio
+```
+
+Composio's current Python SDK requires Python 3.10+ and supports direct `composio.tools.execute(...)` calls. If a tool requires a specific toolkit version, set `composio.toolkit_version` in `data/config.json`. citeturn0search0turn0search5turn0search7
+
+## Updating the app
+
+**Use this whenever you want to update to the latest version from GitHub:**
+
+```sh
+cd ~/composio-agent
+git pull --ff-only
+python -m pip install -r requirements.txt --upgrade
+```
+
+Then start it normally:
 
 ```sh
 python app.py
 ```
 
-On first launch the wizard walks you through:
+For the optional Discord bot:
 
-1. **Composio API key** *(optional)* — validated against Composio if given.
-2. **Discord bot token + allowed channel ID** *(optional)* — only needed for the bot.
-3. **Provider API keys** — for each provider, optionally add a key and mark it FREE or PAID tier.
-4. **Default mode** — Manual / Free / Auto (default: Free).
+```sh
+python app.py --bot
+```
 
-It writes `data/config.json` (non-secret settings) and `.env` (all secrets). Everything is editable
-later from the menus or by hand. Blank answers skip.
+### Updating without losing your settings
 
-### Where to get API keys
+`.env` and `data/` are deliberately ignored by Git, so a normal `git pull` does **not** replace your API keys, chat history, notes or logs.
 
-[Groq](https://console.groq.com) · [Gemini](https://aistudio.google.com) ·
-[OpenAI](https://platform.openai.com) · [OpenRouter](https://openrouter.ai/keys) ·
-[Cerebras](https://cloud.cerebras.ai) · [DeepSeek](https://platform.deepseek.com) ·
-[xAI](https://console.x.ai) · [Composio](https://platform.composio.dev)
+If Git reports local changes before updating, check them first instead of using `git reset --hard`:
 
----
+```sh
+git status
+git diff
+```
 
-## Usage
+Do **not** delete `.env` or `data/` if you want to keep your local configuration and history.
 
-### Terminal app
+## First run
 
 ```sh
 python app.py
 ```
 
-```
+The setup wizard can configure:
+
+1. Composio API key (optional).
+2. Discord token and allowed channel (optional).
+3. Provider API keys, including whether each key is free-tier.
+4. Default Manual / Free / Auto mode.
+
+Secrets are written to `.env`; non-secret settings go into `data/config.json`.
+
+## Terminal usage
+
+```text
 === Tab Assistant | GROQ / llama-3.3-70b-versatile | free ===
 1. Start / continue chat       6. Memory & history
 2. Choose provider             7. Composio tools & connections
@@ -140,74 +110,132 @@ python app.py
 5. Manage API keys             0. Exit
 ```
 
-- **Menu 5 — Manage API keys**: add / replace / delete keys, toggle free↔paid, and see per-key
-  health (OK, rate-limited until HH:MM, or the last error).
-- **Menu 6 — Memory & history**: list past sessions, resume one, delete one (`d NUMBER`), or clear
-  all (`c`).
-- **Menu 7 — Tools**: build and approve an action plan, or get Composio connection help.
-- **Menu 9 — Settings**: system prompt, history length, streaming on/off, temperature, plan-approval
-  on/off, and a handy **"Fetch free OpenRouter models"** that pulls the current list of $0 models
-  straight from OpenRouter's API.
+Inside chat:
 
-Inside chat, the prompt shows your live context —
-`you@tab [GROQ llama-3.3-70b-versatile | free] >` — and `/quit` returns to the menu.
-`Ctrl-C` anywhere backs out safely.
+- `/help` — show commands
+- `/new` — start a new conversation
+- `/history` — show recent messages
+- `/provider NAME` — change provider
+- `/model NAME` — change model
+- `/mode MODE` — `manual`, `free` or `auto`
+- `/quit` — return to the menu
+- `Ctrl-C` / EOF — safely return to the menu
 
-### Discord bot
+## Provider modes
+
+- **Manual** — use the selected provider/model and its first key only.
+- **Free** — only keys marked FREE are used, with automatic failover.
+- **Auto** — both FREE and PAID keys may be used.
+
+A failed key is temporarily cooled down instead of being hammered repeatedly. The last successful provider/model is preferred on the next request.
+
+## Discord bot
 
 ```sh
 python app.py --bot
 ```
 
-For 24/7 background use on Termux, run it inside tmux:
+For a long-running Termux session, `tmux` is recommended:
 
 ```sh
-tmux new -s ai
+pkg install tmux -y
+tmux new -s assistant
 python app.py --bot
-# detach with Ctrl-b then d; reattach later with: tmux attach -t ai
 ```
 
-**Creating the Discord bot:**
+Detach with `Ctrl-b`, then `d`. Reattach with:
 
-1. Enable Developer Mode in Discord (Settings → Advanced).
-2. Create an application + bot in the [Discord Developer Portal](https://discord.com/developers/applications) and copy the token.
-3. Invite it to your server with the `bot` and `applications.commands` scopes.
-4. Right-click the channel it should live in → Copy Channel ID, and enter both values in the setup
-   wizard (menu 8 reminds you of the launch command).
-
-### Flags
-
-| Flag | Effect |
-|------|--------|
-| `--bot` | Run the Discord bot instead of the terminal menu. |
-| `--debug` | Also print tracebacks to the screen. Without it they only go to `data/errors.log`. |
-
----
-
-## File layout (created at runtime)
-
-```
-app.py            # the entire application
-.env              # ALL secrets — never commit (gitignored)
-data/
-  config.json     # providers, models, mode, settings — secretly scrubbed
-  memory.json     # saved chat sessions
-  errors.log      # tracebacks for troubleshooting
-  leads.csv       # local ADD_TO_LIST tool output
-  notes.txt       # local SAVE_NOTE tool output
+```sh
+tmux attach -t assistant
 ```
 
-Because model identifiers change over time, the model lists are just data — edit the `models`
-arrays in `data/config.json` (or paste a new ID at the model prompt / via `/model`) without touching
-code.
+The bot refuses DMs and channels other than the configured channel. You can also set `allowed_user_ids` in `data/config.json` for an additional user allowlist.
+
+## Composio
+
+Composio is optional. The terminal assistant and local tools work without it.
+
+The app uses the current Python SDK's direct execution interface. Composio may require a toolkit version for direct execution, so the setting is available here:
+
+```text
+data/config.json
+  composio.toolkit_version
+```
+
+The default is `latest`; if Composio reports that a concrete toolkit version is required, set the version returned by Composio for that toolkit.
+
+## API keys
+
+Supported environment variables are:
+
+```text
+GROQ_API_KEYS=
+GEMINI_API_KEYS=
+OPENAI_API_KEYS=
+OPENROUTER_API_KEYS=
+CEREBRAS_API_KEYS=
+DEEPSEEK_API_KEYS=
+XAI_API_KEYS=
+COMPOSIO_API_KEY=
+DISCORD_BOT_TOKEN=
+DISCORD_ALLOWED_CHANNEL_ID=
+```
+
+Multiple provider keys can be comma-separated. Keys are never written into `data/config.json`.
 
 ## Troubleshooting
 
-- **"No usable API keys"** — add one in menu 5, or switch out of Manual mode.
-- **A key suddenly failing** — check its health in menu 5; cooldowns clear automatically.
-- **Bot is silent** — confirm the token, that you're typing in the configured channel ID, and that
-  the invite included the `applications.commands` scope.
-- **Composio actions fail** — the SDK evolves quickly; if plans return an adapter error, reinstall
-  with `pip install -U composio composio-openai` and re-do the toolkit's OAuth connection.
-- Everything unexpected is logged with a full traceback in `data/errors.log`; rerun with
-  `python app.py --debug` only while actively debugging.
+### Check Python and dependencies
+
+```sh
+python --version
+python -m pip show openai requests
+```
+
+### See the real error
+
+```sh
+python app.py --debug
+```
+
+The normal app also writes tracebacks to:
+
+```text
+data/errors.log
+```
+
+### No usable API keys
+
+Add a key through menu 5, make sure it is marked FREE when using Free mode, or switch to Auto/Manual.
+
+### Provider/model errors
+
+The app automatically retries common OpenAI-compatible incompatibilities by removing optional `temperature` and JSON-format parameters. If a model still fails, use menu 3 to select a model that the provider actually exposes.
+
+Menu 9 can fetch the current free OpenRouter model list directly from OpenRouter.
+
+### Composio errors
+
+Update the SDK:
+
+```sh
+python -m pip install -U composio
+```
+
+Then check `data/config.json` for `composio.toolkit_version` and the Composio connection for the requested toolkit.
+
+## File layout
+
+```text
+app.py            # application
+requirements.txt  # core Python dependencies
+.env              # secrets; never commit
+data/
+  config.json     # non-secret settings
+  memory.json     # saved sessions
+  errors.log      # troubleshooting tracebacks
+  leads.csv       # local list tool output
+  notes.txt       # local notes
+```
+
+The `.gitignore` protects `.env`, `data/`, Python bytecode and caches.
