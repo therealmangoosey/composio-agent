@@ -1,0 +1,71 @@
+name: Add invite menu
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch app.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app.py')
+          s = p.read_text(encoding='utf-8')
+
+          helper = '''\n\ndef discord_invite_link(cfg):\n    """Return a Discord bot invite URL using the configured bot token."""\n    token = cfg.get("discord", {}).get("token", "")\n    if not token:\n        return None, "Set DISCORD_BOT_TOKEN in .env first."\n    try:\n        r = requests.get(\n            "https://discord.com/api/v10/users/@me",\n            headers={"Authorization": "Bot " + token},\n            timeout=10,\n        )\n        if not r.ok:\n            return None, "Discord rejected the bot token."\n        app_id = str(r.json().get("id", ""))\n        if not app_id:\n            return None, "Discord did not return the bot application ID."\n        return (\n            "https://discord.com/oauth2/authorize?client_id="\n            + app_id\n            + "&scope=bot%20applications.commands&permissions=0",\n            None,\n        )\n    except (requests.RequestException, ValueError, TypeError) as exc:\n        return None, "Could not contact Discord: " + short(exc)\n'''
+
+          anchor = '\ndef local_tool(tool, args):\n'
+          if 'def discord_invite_link(cfg):' not in s:
+              if anchor not in s:
+                  raise SystemExit('anchor for invite helper not found')
+              s = s.replace(anchor, helper + anchor, 1)
+
+          old_menu = '''        clear(); p(f"=== Tab Assistant | {cfg['selected_provider']} / {cfg['selected_model']} | {cfg['mode']} ===")\n        p("1. Start / continue chat       6. Memory & history\\n2. Choose provider             7. Composio tools & connections\\n3. Choose model                8. Discord bot\\n4. Choose mode                 9. Settings\\n5. Manage API keys             0. Exit")\n'''
+          new_menu = '''        clear(); p(f"=== Tab Assistant | {cfg['selected_provider']} / {cfg['selected_model']} | {cfg['mode']} ===")\n        p("1. Start / continue chat       6. Memory & history\\n2. Choose provider             7. Composio tools & connections\\n3. Choose model                8. Discord bot\\n4. Choose mode                 9. Settings\\n5. Manage API keys            10. Invite bot to a server\\n0. Exit")\n'''
+          if old_menu not in s:
+              raise SystemExit('old menu text not found')
+          s = s.replace(old_menu, new_menu, 1)
+
+          old_branch = '''        elif choice == "8": p("Run in another Termux/tmux session: python app.py --bot"); input("Enter")\n        elif choice == "9": settings(cfg)\n'''
+          new_branch = '''        elif choice == "8": p("Run in another Termux/tmux session: python app.py --bot"); input("Enter")\n        elif choice == "9": settings(cfg)\n        elif choice == "10":\n            link, error = discord_invite_link(cfg)\n            if link:\n                p("\\nInvite link:")\n                p(link)\n            else:\n                p("\\n❌ " + error)\n            input("Enter to continue")\n'''
+          if old_branch not in s:
+              raise SystemExit('menu branch not found')
+          s = s.replace(old_branch, new_branch, 1)
+
+          compile(s, 'app.py', 'exec')
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Update README
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('README.md')
+          s = p.read_text(encoding='utf-8')
+          old = '5. Manage API keys             0. Exit'
+          new = '5. Manage API keys            10. Invite bot to a server\\n0. Exit'
+          if old in s and '10. Invite bot to a server' not in s:
+              s = s.replace(old, new, 1)
+          note = '\nFrom the terminal menu, choose **10. Invite bot to a server** to print the bot’s Discord OAuth invite link. The bot token must be configured in `.env`.\n'
+          marker = '## Discord bot\n'
+          if 'choose **10. Invite bot to a server**' not in s and marker in s:
+              s = s.replace(marker, marker + note + '\n', 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Commit and remove one-time workflow
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/invite-menu.yml
+          git add app.py README.md
+          git commit -m "Add Discord bot invite menu option"
+          git push
