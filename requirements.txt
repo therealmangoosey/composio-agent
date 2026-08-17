@@ -1,10 +1,7 @@
 # Core dependencies for the terminal app
-# Deliberately pure-Python here: the app ships its own small OpenAI-compatible
-# HTTP client so Termux/Android does not need Rust/PyO3 wheels such as jiter.
 requests>=2.31,<3
 
-# Optional Discord bot
-# discord.py>=2.4,<3
+discord.py>=2.4,<3
 
 # Optional Composio tools
 # composio>=0.13
