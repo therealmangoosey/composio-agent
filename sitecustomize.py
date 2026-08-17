@@ -111,7 +111,8 @@ def _patch_tree(module):
     registered = set()
 
     async def patched_sync(self, *args, **kwargs):
-        if id(self) not in registered:
+        first_time = id(self) not in registered
+        if first_time:
             try:
                 async def this_channel(interaction):
                     if interaction.guild is None:
@@ -150,7 +151,17 @@ def _patch_tree(module):
                 registered.add(id(self))
             except Exception as exc:
                 _original_print("Discord channel command setup failed: " + str(exc))
-        return await original_sync(self, *args, **kwargs)
+        result = await original_sync(self, *args, **kwargs)
+        if first_time:
+            try:
+                client = getattr(self, "client", None)
+                guilds = list(getattr(client, "guilds", []) or [])
+                for guild in guilds:
+                    await original_sync(self, guild=guild)
+                _original_print(f"Discord commands synced to {len(guilds)} server(s).")
+            except Exception as exc:
+                _original_print("Discord guild command sync failed: " + str(exc))
+        return result
 
     module.CommandTree.sync = patched_sync
 
@@ -212,7 +223,7 @@ def _patch_discord(module):
                             provider = cfg.get("selected_provider", "")
                             model = cfg.get("selected_model", "")
                         else:
-                            answer, provider, model = await asyncio.to_thread(send, cfg, session, False)
+                            answer, provider, model = await asyncio.to_thread(send, cfg, session, stream=False)
                         add(session, "assistant", answer, provider, model)
                         await message.reply(str(answer)[:1900], mention_author=False)
                 except Exception as exc:
