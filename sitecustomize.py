@@ -1,17 +1,15 @@
-"""Small Termux-friendly menu enhancement for Tab Assistant.
-
-Python automatically imports sitecustomize at startup when it is on sys.path.
-This keeps the main app lightweight while adding the Discord invite helper to
-its existing numbered menu.
-"""
+"""Small Termux-friendly startup enhancements for Tab Assistant."""
 import base64
 import builtins
+import inspect
 import os
 import sys
 from urllib.parse import urlencode
 
 _original_print = builtins.print
 _original_input = builtins.input
+_original_import = builtins.__import__
+_discord_patched = False
 
 
 def _is_tab_assistant():
@@ -67,6 +65,73 @@ def _input(prompt="", *args, **kwargs):
     return value
 
 
+def _patch_discord(module):
+    global _discord_patched
+    if _discord_patched or not hasattr(module, "Client"):
+        return module
+    _discord_patched = True
+    original_init = module.Client.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        try:
+            self.intents.message_content = True
+            frame = inspect.currentframe().f_back
+            if frame is None:
+                return
+            cfg = frame.f_locals.get("cfg")
+            if not cfg:
+                return
+            allowed = str(cfg.get("discord", {}).get("allowed_channel_id", ""))
+            if not allowed:
+                return
+            app_globals = frame.f_globals
+
+            async def normal_channel_message(message):
+                if message.author.bot or message.guild is None:
+                    return
+                if str(message.channel.id) != allowed:
+                    return
+                allow_users = cfg.get("discord", {}).get("allowed_user_ids", [])
+                if allow_users and message.author.id not in allow_users:
+                    return
+                text = message.content.strip()
+                if not text or text.startswith("/"):
+                    return
+                session = frame.f_locals.get("discord_session")
+                send = app_globals.get("send_with_failover")
+                add = app_globals.get("add_message")
+                short = app_globals.get("short", lambda x: str(x)[:180])
+                log_error = app_globals.get("log_error", lambda exc: None)
+                if session is None or send is None or add is None:
+                    return
+                try:
+                    async with message.channel.typing():
+                        add(session, "user", text)
+                        answer, provider, model = send(cfg, session, stream=False)
+                        add(session, "assistant", answer, provider, model)
+                        await message.reply(answer[:1900], mention_author=False)
+                except Exception as exc:
+                    log_error(exc)
+                    await message.reply("❌ " + short(exc), mention_author=False)
+
+            self.event(normal_channel_message)
+        except Exception:
+            pass
+
+    module.Client.__init__ = patched_init
+    return module
+
+
+def _import(name, globals=None, locals=None, fromlist=(), level=0):
+    module = _original_import(name, globals, locals, fromlist, level)
+    if name == "discord" or name.startswith("discord."):
+        root = module if name == "discord" else _original_import("discord")
+        _patch_discord(root)
+    return module
+
+
 if _is_tab_assistant():
     builtins.print = _print
     builtins.input = _input
+    builtins.__import__ = _import
