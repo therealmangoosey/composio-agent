@@ -107,7 +107,7 @@ Secrets are written to `.env`; non-secret settings go into `data/config.json`.
 2. Choose provider             7. Composio tools & connections
 3. Choose model                8. Discord bot
 4. Choose mode                 9. Settings
-5. Manage API keys             0. Exit
+5. Manage API keys            10. Invite bot to a server\n0. Exit
 ```
 
 Inside chat:
@@ -130,6 +130,9 @@ Inside chat:
 A failed key is temporarily cooled down instead of being hammered repeatedly. The last successful provider/model is preferred on the next request.
 
 ## Discord bot
+
+From the terminal menu, choose **10. Invite bot to a server** to print the bot’s Discord OAuth invite link. The bot token must be configured in `.env`.
+
 
 ```sh
 python app.py --bot

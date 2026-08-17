@@ -543,6 +543,32 @@ def manage_keys(cfg):
         persist_runtime(cfg)
 
 
+
+def discord_invite_link(cfg):
+    """Return a Discord bot invite URL using the configured bot token."""
+    token = cfg.get("discord", {}).get("token", "")
+    if not token:
+        return None, "Set DISCORD_BOT_TOKEN in .env first."
+    try:
+        r = requests.get(
+            "https://discord.com/api/v10/users/@me",
+            headers={"Authorization": "Bot " + token},
+            timeout=10,
+        )
+        if not r.ok:
+            return None, "Discord rejected the bot token."
+        app_id = str(r.json().get("id", ""))
+        if not app_id:
+            return None, "Discord did not return the bot application ID."
+        return (
+            "https://discord.com/oauth2/authorize?client_id="
+            + app_id
+            + "&scope=bot%20applications.commands&permissions=0",
+            None,
+        )
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        return None, "Could not contact Discord: " + short(exc)
+
 def local_tool(tool, args):
     DATA.mkdir(parents=True, exist_ok=True)
     args = args if isinstance(args, dict) else {}
@@ -701,7 +727,7 @@ def history_menu(cfg):
 def main_menu(cfg):
     while True:
         clear(); p(f"=== Tab Assistant | {cfg['selected_provider']} / {cfg['selected_model']} | {cfg['mode']} ===")
-        p("1. Start / continue chat       6. Memory & history\n2. Choose provider             7. Composio tools & connections\n3. Choose model                8. Discord bot\n4. Choose mode                 9. Settings\n5. Manage API keys             0. Exit")
+        p("1. Start / continue chat       6. Memory & history\n2. Choose provider             7. Composio tools & connections\n3. Choose model                8. Discord bot\n4. Choose mode                 9. Settings\n5. Manage API keys            10. Invite bot to a server\n0. Exit")
         try:
             choice = input("\nChoose: ").strip()
         except (KeyboardInterrupt, EOFError):
@@ -716,6 +742,14 @@ def main_menu(cfg):
         elif choice == "7": tools_menu(cfg)
         elif choice == "8": p("Run in another Termux/tmux session: python app.py --bot"); input("Enter")
         elif choice == "9": settings(cfg)
+        elif choice == "10":
+            link, error = discord_invite_link(cfg)
+            if link:
+                p("\nInvite link:")
+                p(link)
+            else:
+                p("\n❌ " + error)
+            input("Enter to continue")
 
 
 def run_bot(cfg):
