@@ -11,6 +11,18 @@ _original_input = builtins.input
 _original_import = builtins.__import__
 _discord_patched = False
 
+COMPOSIO_KNOWLEDGE = (
+    "\n\nYou are the Discord interface for Tab Assistant. You have access to Composio tools "
+    "configured by the owner. When a user asks you to perform an action that requires a "
+    "connected app or external service, do NOT claim you lack access. Use the Composio "
+    "tool-planning and execution system available to you. Available configured toolkits "
+    "are read from the assistant configuration and may include Gmail, web search, and news. "
+    "You can also use the local list and note tools. If a requested capability is not "
+    "configured or a tool execution fails, explain the actual reason. Never pretend an action "
+    "was completed without a successful tool result. For actions that change or send data, "
+    "follow the configured approval requirement."
+)
+
 
 def _is_tab_assistant():
     script = os.path.basename(sys.argv[0] or "")
@@ -82,6 +94,7 @@ def _patch_discord(module):
             cfg = frame.f_locals.get("cfg")
             if not cfg:
                 return
+            cfg["settings"]["system_prompt"] = cfg["settings"].get("system_prompt", "") + COMPOSIO_KNOWLEDGE
             allowed = str(cfg.get("discord", {}).get("allowed_channel_id", ""))
             if not allowed:
                 return
@@ -103,12 +116,31 @@ def _patch_discord(module):
                 add = app_globals.get("add_message")
                 short = app_globals.get("short", lambda x: str(x)[:180])
                 log_error = app_globals.get("log_error", lambda exc: None)
+                build_plan = app_globals.get("build_plan")
+                execute_plan = app_globals.get("execute_plan")
                 if session is None or send is None or add is None:
                     return
                 try:
                     async with message.channel.typing():
                         add(session, "user", text)
-                        answer, provider, model = send(cfg, session, stream=False)
+                        tool_words = ("composio", "send an email", "email", "gmail", "search the web", "web search", "news", "save a note", "add to list", "read my")
+                        wants_tool = any(word in text.lower() for word in tool_words)
+                        if wants_tool and build_plan and execute_plan:
+                            plan = build_plan(cfg, text)
+                            steps = plan.get("steps", [])
+                            results = execute_plan(cfg, plan)
+                            successful = [str(result) for ok, result in results if ok]
+                            failed = [str(result) for ok, result in results if not ok]
+                            if successful:
+                                answer = "Done. " + " | ".join(successful)
+                            elif failed:
+                                answer = "I couldn't complete that: " + " | ".join(failed)
+                            else:
+                                answer = "I couldn't find a tool action for that request."
+                            provider = cfg.get("selected_provider", "")
+                            model = cfg.get("selected_model", "")
+                        else:
+                            answer, provider, model = send(cfg, session, stream=False)
                         add(session, "assistant", answer, provider, model)
                         await message.reply(answer[:1900], mention_author=False)
                 except Exception as exc:
